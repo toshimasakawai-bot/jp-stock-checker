@@ -57,7 +57,6 @@ def load_portfolio():
         if not records:
             return [{"ticker": "7203.T", "name_jp": "トヨタ自動車", "name_en": "TOYOTA MOTOR CORP", "buy_price": 2500.0, "shares": 100},
                     {"ticker": "8306.T", "name_jp": "三菱UFJフィナンシャル・G", "name_en": "MITSUBISHI UFJ FINANCIAL", "buy_price": 1200.0, "shares": 100}]
-        # 既存データにカラムが足りない場合の補正
         for r in records:
             if "name_jp" not in r: r["name_jp"] = r.get("name", "名称未設定")
             if "name_en" not in r: r["name_en"] = "-"
@@ -77,54 +76,83 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 st.title("📈 日本株 配当・株価チェッカー")
-st.write("ポートフォリオ管理・購入時利回り算出対応版")
+st.write("プレビュー機能付き・ポートフォリオ管理アプリ")
 
 # ==========================================
-# 3. 銘柄の追加・削除フォーム
+# 3. 銘柄のプレビュー＆追加セクション
 # ==========================================
-with st.form("add_ticker_form"):
-    st.subheader("➕ 新規銘柄の追加")
-    col1, col2 = st.columns(2)
-    with col1:
-        new_ticker = st.text_input("銘柄コード（例: 7203）", "")
-        new_buy_price = st.number_input("購入時株価 (円)", min_value=0.0, value=0.0, step=10.0)
-    with col2:
-        new_name_jp = st.text_input("銘柄名（日本語）", "")
-        new_shares = st.number_input("保有株数", min_value=1, value=100, step=1)
+st.subheader("➕ 新規銘柄の追加")
+
+if "preview_data" not in st.session_state:
+    st.session_state.preview_data = None
+
+# コード入力とプレビューボタンを横並び配置
+col1, col2 = st.columns([3, 1])
+with col1:
+    input_ticker = st.text_input("銘柄コード（例: 7203）", value="")
+with col2:
+    st.write("") # ボタンの位置調整用パディング
+    preview_btn = st.button("🔍 プレビュー")
+
+if preview_btn and input_ticker:
+    clean_code = input_ticker.strip().upper()
+    if not clean_code.endswith(".T") and clean_code.isdigit():
+        clean_code += ".T"
     
-    submitted = st.form_submit_button("情報を取得して追加する")
-    if submitted and new_ticker:
-        clean_code = new_ticker.strip().upper()
-        if not clean_code.endswith(".T") and clean_code.isdigit():
-            clean_code += ".T"
-        
-        # すでに登録されているかチェック
-        exists = any(item["ticker"] == clean_code for item in st.session_state.portfolio)
-        if not exists:
-            # yfinanceで英語名や現在価格を取得して自動補完
-            fetched_en = clean_code
-            try:
-                stock = yf.Ticker(clean_code)
-                info = stock.info
-                fetched_en = info.get("longName", clean_code)
-            except Exception:
-                pass
+    with st.spinner("情報を取得中..."):
+        try:
+            stock = yf.Ticker(clean_code)
+            info = stock.info
+            name_en = info.get("longName", clean_code)
+            current_price = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
+            dividend_rate = info.get("dividendRate") or 0.0
+            dividend_yield = round((dividend_rate / current_price) * 100, 2) if current_price > 0 and dividend_rate > 0 else 0.0
             
-            display_name_jp = new_name_jp.strip() if new_name_jp.strip() else clean_code
-
-            new_item = {
+            st.session_state.preview_data = {
                 "ticker": clean_code,
-                "name_jp": display_name_jp,
-                "name_en": fetched_en,
-                "buy_price": float(new_buy_price),
-                "shares": int(new_shares)
+                "name_en": name_en,
+                "current_price": current_price,
+                "dividend_yield": dividend_yield
             }
-            st.session_state.portfolio.append(new_item)
-            save_portfolio(st.session_state.portfolio)
-            st.success(f"{clean_code} ({display_name_jp}) を追加しました！")
-            st.rerun()
-        else:
-            st.warning("すでにリストに登録されています。")
+        except Exception as e:
+            st.error(f"データの取得に失敗しました: {e}")
+            st.session_state.preview_data = None
+
+# プレビュー結果が存在する場合のみ、詳細情報と追加フォームを表示
+if st.session_state.preview_data:
+    p = st.session_state.preview_data
+    st.info(f"**【プレビュー結果】**\n\n"
+            f"- **銘柄コード**: `{p['ticker']}`\n"
+            f"- **英語銘柄名**: `{p['name_en']}`\n"
+            f"- **現在の株価**: `{p['current_price']:,} 円`\n"
+            f"- **現在の配当利回り**: `{p['dividend_yield']}%`")
+
+    with st.form("register_form"):
+        st.write("上記を確認の上、詳細情報を入力して追加してください。")
+        reg_name_jp = st.text_input("銘柄名（日本語）", value="")
+        reg_buy_price = st.number_input("購入時株価 (円)", min_value=0.0, value=float(p["current_price"]), step=10.0)
+        reg_shares = st.number_input("保有株数", min_value=1, value=100, step=1)
+        
+        submitted = st.form_submit_button("この内容でポートフォリオに追加する")
+        if submitted:
+            exists = any(item["ticker"] == p["ticker"] for item in st.session_state.portfolio)
+            if not exists:
+                new_item = {
+                    "ticker": p["ticker"],
+                    "name_jp": reg_name_jp.strip() if reg_name_jp.strip() else p["name_en"],
+                    "name_en": p["name_en"],
+                    "buy_price": float(reg_buy_price),
+                    "shares": int(reg_shares)
+                }
+                st.session_state.portfolio.append(new_item)
+                save_portfolio(st.session_state.portfolio)
+                st.success(f"{p['ticker']} ({new_item['name_jp']}) を追加しました！")
+                st.session_state.preview_data = None  # 登録完了後にプレビューをリセット
+                st.rerun()
+            else:
+                st.warning("すでにリストに登録されています。")
+
+st.divider()
 
 if st.session_state.portfolio:
     st.subheader("🗑️ 銘柄の削除")
@@ -140,7 +168,7 @@ if st.session_state.portfolio:
 st.divider()
 
 # ==========================================
-# 4. 株価・配当情報の取得と一覧表示
+# 4. 保有銘柄一覧の表示
 # ==========================================
 st.subheader("📊 保有銘柄一覧")
 
@@ -151,7 +179,7 @@ else:
         st.rerun()
 
     data_list = []
-    with st.spinner("株価と配当情報を取得中..."):
+    with st.spinner("株価と配当情報を更新中..."):
         for item in st.session_state.portfolio:
             t = item["ticker"]
             name_jp = item["name_jp"]
@@ -163,13 +191,10 @@ else:
                 stock = yf.Ticker(t)
                 info = stock.info
                 
-                current_price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
-                dividend_rate = info.get("dividendRate") or 0.0 # 1株あたりの年間配当額
+                current_price = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
+                dividend_rate = info.get("dividendRate") or 0.0
                 
-                # 現在株価ベースの配当利回り
                 current_yield = round((dividend_rate / current_price) * 100, 2) if current_price > 0 and dividend_rate > 0 else 0.0
-                
-                # 購入時株価ベースの配当利回り (配当金 ÷ 購入時株価)
                 buy_yield = round((dividend_rate / buy_price) * 100, 2) if buy_price > 0 and dividend_rate > 0 else 0.0
 
                 data_list.append({
