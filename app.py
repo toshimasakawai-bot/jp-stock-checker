@@ -76,7 +76,7 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 st.title("📈 日本株 配当・株価チェッカー")
-st.write("高度分析（割安判定・トレンド判定）対応版")
+st.write("プレビュー機能・高度分析対応版")
 
 # ==========================================
 # 3. 銘柄のプレビュー＆追加セクション
@@ -171,7 +171,6 @@ st.divider()
 st.subheader("📊 保有銘柄一覧 ＆ 分析")
 
 def analyze_valuation(stock, current_price, current_yield):
-    """ 過去5年の利回り分布に基づくパターンB（パーセンタイル方式） """
     try:
         hist = stock.history(period="5y")
         divs = stock.dividends
@@ -197,8 +196,8 @@ def analyze_valuation(stock, current_price, current_yield):
             return "データ不足"
         
         s = pd.Series(historical_yields)
-        p75 = s.quantile(0.75) # 高利回り帯（安値圏）
-        p25 = s.quantile(0.25) # 低利回り帯（高値圏）
+        p75 = s.quantile(0.75)
+        p25 = s.quantile(0.25)
         
         if current_yield >= p75:
             return "割安 🟢"
@@ -210,7 +209,6 @@ def analyze_valuation(stock, current_price, current_yield):
         return "判定不能"
 
 def analyze_trend(stock):
-    """ 200日移動平均線 ＋ 傾きを考慮した少し厳しめの判定 """
     try:
         hist = stock.history(period="2y")
         if len(hist) < 220:
@@ -224,7 +222,7 @@ def analyze_trend(stock):
         
         current_price = hist['Close'].iloc[-1]
         ma_latest = hist['MA200'].iloc[-1]
-        ma_past = hist['MA200'].iloc[-20] # 20営業日前との比較
+        ma_past = hist['MA200'].iloc[-20]
         
         if current_price > ma_latest and ma_latest > ma_past:
             return "上昇トレンド 📈"
@@ -260,7 +258,6 @@ else:
                 current_yield = round((dividend_rate / current_price) * 100, 2) if current_price > 0 and dividend_rate > 0 else 0.0
                 buy_yield = round((dividend_rate / buy_price) * 100, 2) if buy_price > 0 and dividend_rate > 0 else 0.0
                 
-                # 高度分析の実行
                 valuation_result = analyze_valuation(stock, current_price, current_yield)
                 trend_result = analyze_trend(stock)
 
@@ -271,6 +268,7 @@ else:
                     "現在利回り (%)": current_yield,
                     "割高/割安判定": valuation_result,
                     "トレンド判定": trend_result,
+                    "購入時株価 (円)": buy_price,
                     "購入時利回り (%)": buy_yield,
                     "保有株数": shares
                 })
@@ -282,6 +280,7 @@ else:
                     "現在利回り (%)": 0.0,
                     "割高/割安判定": "エラー",
                     "トレンド判定": "エラー",
+                    "購入時株価 (円)": buy_price,
                     "購入時利回り (%)": 0.0,
                     "保有株数": shares
                 })
