@@ -76,7 +76,7 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 st.title("📈 日本株 配当・株価チェッカー")
-st.write("プレビュー機能付き・ポートフォリオ管理アプリ")
+st.write("高度分析（割安判定・トレンド判定）対応版")
 
 # ==========================================
 # 3. 銘柄のプレビュー＆追加セクション
@@ -86,12 +86,11 @@ st.subheader("➕ 新規銘柄の追加")
 if "preview_data" not in st.session_state:
     st.session_state.preview_data = None
 
-# コード入力とプレビューボタンを横並び配置
 col1, col2 = st.columns([3, 1])
 with col1:
     input_ticker = st.text_input("銘柄コード（例: 7203）", value="")
 with col2:
-    st.write("") # ボタンの位置調整用パディング
+    st.write("")
     preview_btn = st.button("🔍 プレビュー")
 
 if preview_btn and input_ticker:
@@ -118,7 +117,6 @@ if preview_btn and input_ticker:
             st.error(f"データの取得に失敗しました: {e}")
             st.session_state.preview_data = None
 
-# プレビュー結果が存在する場合のみ、詳細情報と追加フォームを表示
 if st.session_state.preview_data:
     p = st.session_state.preview_data
     st.info(f"**【プレビュー結果】**\n\n"
@@ -147,7 +145,7 @@ if st.session_state.preview_data:
                 st.session_state.portfolio.append(new_item)
                 save_portfolio(st.session_state.portfolio)
                 st.success(f"{p['ticker']} ({new_item['name_jp']}) を追加しました！")
-                st.session_state.preview_data = None  # 登録完了後にプレビューをリセット
+                st.session_state.preview_data = None
                 st.rerun()
             else:
                 st.warning("すでにリストに登録されています。")
@@ -168,18 +166,83 @@ if st.session_state.portfolio:
 st.divider()
 
 # ==========================================
-# 4. 保有銘柄一覧の表示
+# 4. 保有銘柄一覧と分析ロジック
 # ==========================================
-st.subheader("📊 保有銘柄一覧")
+st.subheader("📊 保有銘柄一覧 ＆ 分析")
+
+def analyze_valuation(stock, current_price, current_yield):
+    """ 過去5年の利回り分布に基づくパターンB（パーセンタイル方式） """
+    try:
+        hist = stock.history(period="5y")
+        divs = stock.dividends
+        if hist.empty or divs.empty or current_price == 0:
+            return "データ不足"
+        
+        hist.index = hist.index.tz_localize(None)
+        divs.index = divs.index.tz_localize(None)
+        
+        full_date_range = pd.date_range(start=hist.index.min(), end=hist.index.max(), freq='D')
+        div_daily = divs.resample('D').sum().reindex(full_date_range, fill_value=0)
+        annual_div_series = div_daily.rolling(window=365, min_periods=1).sum()
+        
+        historical_yields = []
+        for date, row in hist.iterrows():
+            close = row['Close']
+            if close > 0:
+                d_sum = annual_div_series.asof(date)
+                if pd.notna(d_sum) and d_sum > 0:
+                    historical_yields.append((d_sum / close) * 100)
+        
+        if len(historical_yields) < 30:
+            return "データ不足"
+        
+        s = pd.Series(historical_yields)
+        p75 = s.quantile(0.75) # 高利回り帯（安値圏）
+        p25 = s.quantile(0.25) # 低利回り帯（高値圏）
+        
+        if current_yield >= p75:
+            return "割安 🟢"
+        elif current_yield <= p25:
+            return "割高 🔴"
+        else:
+            return "適正 ⚪"
+    except Exception:
+        return "判定不能"
+
+def analyze_trend(stock):
+    """ 200日移動平均線 ＋ 傾きを考慮した少し厳しめの判定 """
+    try:
+        hist = stock.history(period="2y")
+        if len(hist) < 220:
+            return "データ不足"
+        
+        hist['MA200'] = hist['Close'].rolling(window=200).mean()
+        hist = hist.dropna(subset=['MA200'])
+        
+        if len(hist) < 20:
+            return "データ不足"
+        
+        current_price = hist['Close'].iloc[-1]
+        ma_latest = hist['MA200'].iloc[-1]
+        ma_past = hist['MA200'].iloc[-20] # 20営業日前との比較
+        
+        if current_price > ma_latest and ma_latest > ma_past:
+            return "上昇トレンド 📈"
+        elif current_price < ma_latest and ma_latest < ma_past:
+            return "下降トレンド 📉"
+        else:
+            return "レンジ / 停滞 〰️"
+    except Exception:
+        return "判定不能"
 
 if not st.session_state.portfolio:
     st.info("銘柄が登録されていません。")
 else:
-    if st.button("🔄 最新情報を更新"):
+    if st.button("🔄 最新情報・分析を更新"):
         st.rerun()
 
     data_list = []
-    with st.spinner("株価と配当情報を更新中..."):
+    with st.spinner("株価データ取得および高度分析を実行中...（数秒かかります）"):
         for item in st.session_state.portfolio:
             t = item["ticker"]
             name_jp = item["name_jp"]
@@ -196,15 +259,18 @@ else:
                 
                 current_yield = round((dividend_rate / current_price) * 100, 2) if current_price > 0 and dividend_rate > 0 else 0.0
                 buy_yield = round((dividend_rate / buy_price) * 100, 2) if buy_price > 0 and dividend_rate > 0 else 0.0
+                
+                # 高度分析の実行
+                valuation_result = analyze_valuation(stock, current_price, current_yield)
+                trend_result = analyze_trend(stock)
 
                 data_list.append({
                     "銘柄コード": t,
                     "銘柄名(日本語)": name_jp,
-                    "銘柄名(英語)": name_en,
                     "現在株価 (円)": current_price,
-                    "年間配当 (円)": dividend_rate,
                     "現在利回り (%)": current_yield,
-                    "購入時株価 (円)": buy_price,
+                    "割高/割安判定": valuation_result,
+                    "トレンド判定": trend_result,
                     "購入時利回り (%)": buy_yield,
                     "保有株数": shares
                 })
@@ -212,11 +278,10 @@ else:
                 data_list.append({
                     "銘柄コード": t,
                     "銘柄名(日本語)": name_jp,
-                    "銘柄名(英語)": name_en,
                     "現在株価 (円)": 0,
-                    "年間配当 (円)": 0,
                     "現在利回り (%)": 0.0,
-                    "購入時株価 (円)": buy_price,
+                    "割高/割安判定": "エラー",
+                    "トレンド判定": "エラー",
                     "購入時利回り (%)": 0.0,
                     "保有株数": shares
                 })
