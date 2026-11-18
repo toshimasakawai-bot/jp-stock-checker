@@ -53,68 +53,88 @@ except Exception as e:
 
 def load_portfolio():
     try:
-        # スプレッドシートからレコードを取得 (A列: ticker, B列: name)
         records = sheet.get_all_records()
         if not records:
-            return [{"ticker": "7203.T", "name": "トヨタ自動車"},
-                    {"ticker": "8306.T", "name": "三菱UFJフィナンシャル・G"},
-                    {"ticker": "9432.T", "name": "日本電信電話"}]
+            return [{"ticker": "7203.T", "name_jp": "トヨタ自動車", "name_en": "TOYOTA MOTOR CORP", "buy_price": 2500.0, "shares": 100},
+                    {"ticker": "8306.T", "name_jp": "三菱UFJフィナンシャル・G", "name_en": "MITSUBISHI UFJ FINANCIAL", "buy_price": 1200.0, "shares": 100}]
+        # 既存データにカラムが足りない場合の補正
+        for r in records:
+            if "name_jp" not in r: r["name_jp"] = r.get("name", "名称未設定")
+            if "name_en" not in r: r["name_en"] = "-"
+            if "buy_price" not in r: r["buy_price"] = 0.0
+            if "shares" not in r: r["shares"] = 100
         return records
     except Exception:
-        # 旧形式（1列のみ）のデータが存在した場合の互換用フォールバック
-        data = sheet.col_values(1)
-        if data and data[0].lower() in ["ticker", "銘柄コード", "コード"]:
-            data = data[1:]
-        return [{"ticker": t.strip(), "name": t.strip()} for t in data if t.strip()]
+        return [{"ticker": "7203.T", "name_jp": "トヨタ自動車", "name_en": "TOYOTA MOTOR CORP", "buy_price": 2500.0, "shares": 100}]
 
 def save_portfolio(portfolio):
     sheet.clear()
-    rows = [["ticker", "name"]] + [[item["ticker"], item["name"]] for item in portfolio]
+    headers = ["ticker", "name_jp", "name_en", "buy_price", "shares"]
+    rows = [headers] + [[item.get("ticker"), item.get("name_jp"), item.get("name_en"), item.get("buy_price"), item.get("shares")] for item in portfolio]
     sheet.update(rows)
 
-# セッションへの読み込み
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 st.title("📈 日本株 配当・株価チェッカー")
-st.write("スプレッドシート連動版（日本語名・正しい利回り対応）")
+st.write("ポートフォリオ管理・購入時利回り算出対応版")
 
 # ==========================================
 # 3. 銘柄の追加・削除フォーム
 # ==========================================
 with st.form("add_ticker_form"):
+    st.subheader("➕ 新規銘柄の追加")
     col1, col2 = st.columns(2)
     with col1:
         new_ticker = st.text_input("銘柄コード（例: 7203）", "")
+        new_buy_price = st.number_input("購入時株価 (円)", min_value=0.0, value=0.0, step=10.0)
     with col2:
-        new_name = st.text_input("銘柄名（任意・日本語可）", "")
+        new_name_jp = st.text_input("銘柄名（日本語）", "")
+        new_shares = st.number_input("保有株数", min_value=1, value=100, step=1)
     
-    submitted = st.form_submit_button("銘柄を追加する")
+    submitted = st.form_submit_button("情報を取得して追加する")
     if submitted and new_ticker:
         clean_code = new_ticker.strip().upper()
         if not clean_code.endswith(".T") and clean_code.isdigit():
             clean_code += ".T"
         
-        display_name = new_name.strip() if new_name.strip() else clean_code
-        
         # すでに登録されているかチェック
         exists = any(item["ticker"] == clean_code for item in st.session_state.portfolio)
         if not exists:
-            st.session_state.portfolio.append({"ticker": clean_code, "name": display_name})
+            # yfinanceで英語名や現在価格を取得して自動補完
+            fetched_en = clean_code
+            try:
+                stock = yf.Ticker(clean_code)
+                info = stock.info
+                fetched_en = info.get("longName", clean_code)
+            except Exception:
+                pass
+            
+            display_name_jp = new_name_jp.strip() if new_name_jp.strip() else clean_code
+
+            new_item = {
+                "ticker": clean_code,
+                "name_jp": display_name_jp,
+                "name_en": fetched_en,
+                "buy_price": float(new_buy_price),
+                "shares": int(new_shares)
+            }
+            st.session_state.portfolio.append(new_item)
             save_portfolio(st.session_state.portfolio)
-            st.success(f"{clean_code} ({display_name}) を追加しました！")
+            st.success(f"{clean_code} ({display_name_jp}) を追加しました！")
             st.rerun()
         else:
             st.warning("すでにリストに登録されています。")
 
 if st.session_state.portfolio:
     st.subheader("🗑️ 銘柄の削除")
-    ticker_options = [item["ticker"] for item in st.session_state.portfolio]
-    to_remove = st.selectbox("削除する銘柄を選択", ticker_options)
+    ticker_options = [f"{item['ticker']} - {item['name_jp']}" for item in st.session_state.portfolio]
+    to_remove_label = st.selectbox("削除する銘柄を選択", ticker_options)
     if st.button("選択した銘柄を削除"):
-        st.session_state.portfolio = [item for item in st.session_state.portfolio if item["ticker"] != to_remove]
+        target_ticker = to_remove_label.split(" - ")[0]
+        st.session_state.portfolio = [item for item in st.session_state.portfolio if item["ticker"] != target_ticker]
         save_portfolio(st.session_state.portfolio)
-        st.success(f"{to_remove} を削除しました！")
+        st.success(f"{target_ticker} を削除しました！")
         st.rerun()
 
 st.divider()
@@ -134,42 +154,47 @@ else:
     with st.spinner("株価と配当情報を取得中..."):
         for item in st.session_state.portfolio:
             t = item["ticker"]
-            default_name = item["name"]
+            name_jp = item["name_jp"]
+            name_en = item.get("name_en", "-")
+            buy_price = item.get("buy_price", 0.0)
+            shares = item.get("shares", 0)
+            
             try:
                 stock = yf.Ticker(t)
                 info = stock.info
                 
-                # 株価の取得
                 current_price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
+                dividend_rate = info.get("dividendRate") or 0.0 # 1株あたりの年間配当額
                 
-                # 配当利回りの計算（yfinanceのdividendRate(年間配当額)から正確に算出）
-                dividend_rate = info.get("dividendRate") # 1株あたりの年間配当（円）
-                dividend_yield = info.get("dividendYield")
+                # 現在株価ベースの配当利回り
+                current_yield = round((dividend_rate / current_price) * 100, 2) if current_price > 0 and dividend_rate > 0 else 0.0
                 
-                if dividend_rate and current_price and current_price > 0:
-                    dividend_yield_val = round((dividend_rate / current_price) * 100, 2)
-                elif dividend_yield is not None:
-                    dividend_yield_val = round(dividend_yield * 100, 2)
-                else:
-                    dividend_yield_val = 0.0
+                # 購入時株価ベースの配当利回り (配当金 ÷ 購入時株価)
+                buy_yield = round((dividend_rate / buy_price) * 100, 2) if buy_price > 0 and dividend_rate > 0 else 0.0
 
                 data_list.append({
                     "銘柄コード": t,
-                    "銘柄名": default_name,
-                    "株価 (円)": current_price,
-                    "年間配当 (円)": dividend_rate if dividend_rate else 0,
-                    "配当利回り (%)": dividend_yield_val
+                    "銘柄名(日本語)": name_jp,
+                    "銘柄名(英語)": name_en,
+                    "現在株価 (円)": current_price,
+                    "年間配当 (円)": dividend_rate,
+                    "現在利回り (%)": current_yield,
+                    "購入時株価 (円)": buy_price,
+                    "購入時利回り (%)": buy_yield,
+                    "保有株数": shares
                 })
             except Exception:
                 data_list.append({
                     "銘柄コード": t,
-                    "銘柄名": default_name,
-                    "株価 (円)": 0,
+                    "銘柄名(日本語)": name_jp,
+                    "銘柄名(英語)": name_en,
+                    "現在株価 (円)": 0,
                     "年間配当 (円)": 0,
-                    "配当利回り (%)": 0.0
+                    "現在利回り (%)": 0.0,
+                    "購入時株価 (円)": buy_price,
+                    "購入時利回り (%)": 0.0,
+                    "保有株数": shares
                 })
 
     df = pd.DataFrame(data_list)
     st.dataframe(df, use_container_width=True)
-    
-    st.info("💡 ヒント: Googleスプレッドシート側で直接2列目（銘柄名）を日本語に書き換えても、アプリにそのまま反映されます。")
